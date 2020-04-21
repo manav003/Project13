@@ -1,0 +1,161 @@
+---
+title: "week12"
+author: "Mathi Manavalan"
+date: "4/14/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+Importing the libraries necessary for the data importing, cleaning, and analyzing.
+```{r libraries, message=FALSE}
+library(twitteR)
+library(tidyverse)
+library(tm)
+library(textstem)
+library(qdap)
+library(RWeka)
+library(wordcloud)
+library(stringi)
+
+```
+
+
+## Data Import and Cleaning
+```{r keys,echo=FALSE, message=FALSE, include=TRUE}
+
+api <- "rN5sTV6MAEHLVGwLfL2GeVd7J"
+secretKey <- "uM6NZknlicOfcePx5wu0bkYGZ1rne28QyOSnmttH8NW4af86P8"
+token <- "1244697675271815168-V2BZra642W8OxO8BQ3ohj05CCGRjmY"
+secretToken <- "NqueU63g7QSei8LAyij7JwTH4ei5OotYLzyZCLVr1pW9s"
+
+```
+The keys inputted into the function below are the keys found for my particular app through my Twitter developer account. This allows me to then pull tweets. I am pulling original tweets with the hashtag #psychology and saving it as a tibble. I am also saving the tibble as a csv file.
+
+```{r message=FALSE, include=FALSE}
+setup_twitter_oauth(api, secretKey, token, secretToken)
+
+imported_tbl <- searchTwitter("#psychology", 5000) %>% 
+  strip_retweets() %>% 
+  twListToDF()
+
+imported_tbl$text <- imported_tbl$text %>%
+  iconv("UTF-8", "ASCII", sub="")
+
+write.csv(imported_tbl, "output/tweets_original.csv")
+
+```
+
+I am then creating a corpus.
+```{r}
+twitter_cp <- VCorpus(VectorSource(imported_tbl$text)) 
+
+twitter_cp[[1]]$content
+
+
+twitter_cp<-tm_map(twitter_cp, PlainTextDocument)
+#below line removes all hashtags
+twitter_cp<-tm_map(twitter_cp, content_transformer( (function(x) { 
+  str_remove_all( x, pattern = "#+[a-zA-Z0-9(_)]{0,}")
+})))
+
+twitter_cp<-tm_map(twitter_cp, content_transformer( (function(x) { 
+  str_remove_all( x, pattern = "^(http)[a-zA-Z0-9(_)]{0,}")
+})))
+
+
+
+twitter_cp<-tm_map(twitter_cp, content_transformer(replace_abbreviation))
+twitter_cp<-tm_map(twitter_cp, content_transformer(replace_contraction))
+twitter_cp<-tm_map(twitter_cp, content_transformer(str_to_lower))
+twitter_cp<-tm_map(twitter_cp, removeNumbers)
+twitter_cp<-tm_map(twitter_cp, removePunctuation)
+twitter_cp<-tm_map(twitter_cp, removeWords, c(stopwords("en"), "psychology"))
+twitter_cp<-tm_map(twitter_cp, stripWhitespace)
+twitter_cp<-tm_map(twitter_cp, content_transformer(lemmatize_words))
+
+
+
+myTokenizer <- function(x) {
+  NGramTokenizer(x, Weka_control(min = 1, max = 2))
+}
+
+twitter_dtm <- DocumentTermMatrix(twitter_cp,
+                                  control = list(tokenize = myTokenizer))
+#Here I am using a sparsity factor of 0.99 because otherwise, I am getting very very few terms. 
+slimmed_dtm <- removeSparseTerms(twitter_dtm, 0.99)  #CHANGE THIS TO twitter_dtm
+
+
+
+tokenCounts <- apply(slimmed_dtm, 1, sum)
+slimmed_dtm <- slimmed_dtm[tokenCounts > 0, ]
+
+DTM.matrix <- as.matrix(slimmed_dtm)
+
+dropped_tbl <- as_tibble(DTM.matrix)
+
+
+
+#DTM.matrix <- as.matrix(slimmed_dtm)
+# DTM_tbl <- as_tibble(DTM.matrix)
+# 
+# slimmed_DTM <- removeSparseTerms(DTM, 0.80)
+#
+#tokenCounts<-apply(slimmed_dtm, 1, sum)
+#cleaned_dtm<-slimmed_dtm[tokenCounts> 0, ]
+
+
+#DTM <- DocumentTermMatrix(twitter_cp) # creating just unigram
+
+
+  
+```
+
+
+## Visualization
+
+```{r}
+twitter_tbl <- dropped_tbl
+
+#Word cloud
+wordCounts <- colSums(twitter_tbl)
+wordNames <- names(twitter_tbl)
+wordcloud(wordNames, wordCounts, max.words=50)
+
+
+#Horizontal bar chart
+
+
+
+bigramCounts <- wordCounts[stri_count_words(wordNames) == 2]
+bigrams <- wordNames[stri_count_words(wordNames) == 2]
+
+tibble(bigrams, bigramCounts) %>%
+  arrange(desc(bigramCounts)) %>%
+  top_n(20) %>%
+  mutate(bigrams = reorder(bigrams, bigramCounts)) %>%
+  ggplot(aes(x=bigrams,y=bigramCounts)) + geom_col() + coord_flip()
+
+```
+
+
+## Analysis
+
+### Topic Modeling
+```{r}
+
+```
+
+
+###Machine Learning
+```{r}
+#ADDING A COLUMN ; MAKE SURE ROW NUMBERS MATCH UP
+
+```
+
+
+### Final Interpretation
+
