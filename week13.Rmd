@@ -20,6 +20,13 @@ library(qdap)
 library(RWeka)
 library(wordcloud)
 library(stringi)
+library(ldatuning)
+library(topicmodels)
+library(tidytext)
+library(caret)
+library(parallel)
+library(doParallel)
+library(psych)
 
 ```
 
@@ -33,50 +40,54 @@ token <- "1244697675271815168-V2BZra642W8OxO8BQ3ohj05CCGRjmY"
 secretToken <- "NqueU63g7QSei8LAyij7JwTH4ei5OotYLzyZCLVr1pW9s"
 
 ```
-The keys inputted into the function below are the keys found for my particular app through my Twitter developer account. This allows me to then pull tweets. I am pulling original tweets with the hashtag #psychology and saving it as a tibble. I am also saving the tibble as a csv file.
+The keys inputted into the function below are the keys found for my particular app through my Twitter developer account. This allows me to then pull tweets. I am pulling original tweets with the hashtag #psychology and saving it as a tibble. I am also saving the tibble as a csv file. (After this process was done, I changed it so that I am pulling the twitter data from the output file I created.)
 
 ```{r message=FALSE, include=FALSE}
-setup_twitter_oauth(api, secretKey, token, secretToken)
+# setup_twitter_oauth(api, secretKey, token, secretToken)
+# 
+# imported_tbl <- searchTwitter("#psychology", 5000) %>%
+#   strip_retweets() %>%
+#   twListToDF()
 
-imported_tbl <- searchTwitter("#psychology", 5000) %>% 
-  strip_retweets() %>% 
-  twListToDF()
+imported_tbl <- read.csv("output/tweets_original.csv")
 
-imported_tbl$text <- imported_tbl$text %>%
-  iconv("UTF-8", "ASCII", sub="")
-
-write.csv(imported_tbl, "output/tweets_original.csv")
+# imported_tbl$text <- imported_tbl$text %>%
+#   iconv("UTF-8", "ASCII", sub="")
+# 
+# write.csv(imported_tbl, "output/tweets_original.csv")
 
 ```
 
-I am then creating a corpus.
+I am then creating a corpus of the imported tweets. Here, I am also preprocessing the tweets such that unnecessary fillers, such as punctuation, whitespace, and stopwords, are removed appropriately so that we are left with relevant content. (I have added additional comments to lines that I have newly added or modified in some way that is not immediately intuitive.)
+
+I am then creating a DocumentTermMatrix containing unigrams and bigrams of the content in my corpus. Extremely sparse tokens are removed, as well as those that no longer appear (post preprocessing). Last but not least, I am transforming this into a tibble.
+
 ```{r}
 twitter_cp <- VCorpus(VectorSource(imported_tbl$text)) 
 
-twitter_cp[[1]]$content
-
-
 twitter_cp<-tm_map(twitter_cp, PlainTextDocument)
-#below line removes all hashtags
+
+# below line removes all hashtags
 twitter_cp<-tm_map(twitter_cp, content_transformer( (function(x) { 
   str_remove_all( x, pattern = "#+[a-zA-Z0-9(_)]{0,}")
 })))
 
+# below line removes all hashtags that begin with or are web URLS
 twitter_cp<-tm_map(twitter_cp, content_transformer( (function(x) { 
   str_remove_all( x, pattern = "^(http)[a-zA-Z0-9(_)]{0,}")
 })))
-
-
 
 twitter_cp<-tm_map(twitter_cp, content_transformer(replace_abbreviation))
 twitter_cp<-tm_map(twitter_cp, content_transformer(replace_contraction))
 twitter_cp<-tm_map(twitter_cp, content_transformer(str_to_lower))
 twitter_cp<-tm_map(twitter_cp, removeNumbers)
 twitter_cp<-tm_map(twitter_cp, removePunctuation)
+# below line removes all stopwords as well as the word 'psychology', as that
+  #is the hashtag term that was searched for, so that doesn't add meaning to
+  #our analysis
 twitter_cp<-tm_map(twitter_cp, removeWords, c(stopwords("en"), "psychology"))
 twitter_cp<-tm_map(twitter_cp, stripWhitespace)
 twitter_cp<-tm_map(twitter_cp, content_transformer(lemmatize_words))
-
 
 
 myTokenizer <- function(x) {
@@ -86,49 +97,33 @@ myTokenizer <- function(x) {
 twitter_dtm <- DocumentTermMatrix(twitter_cp,
                                   control = list(tokenize = myTokenizer))
 #Here I am using a sparsity factor of 0.99 because otherwise, I am getting very very few terms. 
-slimmed_dtm <- removeSparseTerms(twitter_dtm, 0.99)  #CHANGE THIS TO twitter_dtm
+twitter_dtm <- removeSparseTerms(twitter_dtm, 0.99)  
 
 
+tokenCounts <- apply(twitter_dtm, 1, sum)
+twitter_dtm <- twitter_dtm[tokenCounts > 0, ]
 
-tokenCounts <- apply(slimmed_dtm, 1, sum)
-slimmed_dtm <- slimmed_dtm[tokenCounts > 0, ]
+DTM.matrix <- as.matrix(twitter_dtm)
 
-DTM.matrix <- as.matrix(slimmed_dtm)
+dropped_tbl <- imported_tbl[tokenCounts > 0, ]
 
-dropped_tbl <- as_tibble(DTM.matrix)
-
-
-
-#DTM.matrix <- as.matrix(slimmed_dtm)
-# DTM_tbl <- as_tibble(DTM.matrix)
-# 
-# slimmed_DTM <- removeSparseTerms(DTM, 0.80)
-#
-#tokenCounts<-apply(slimmed_dtm, 1, sum)
-#cleaned_dtm<-slimmed_dtm[tokenCounts> 0, ]
-
-
-#DTM <- DocumentTermMatrix(twitter_cp) # creating just unigram
-
-
-  
 ```
-
 
 ## Visualization
 
+Here, I am creating a wordcloud visualization of up to the 50 most frequent words, as well as a horizontal bar chart of the top 20 bigram lemmas. 
+
 ```{r}
-twitter_tbl <- dropped_tbl
+twitter_tbl <- as_tibble(DTM.matrix)
 
 #Word cloud
+
 wordCounts <- colSums(twitter_tbl)
 wordNames <- names(twitter_tbl)
 wordcloud(wordNames, wordCounts, max.words=50)
 
 
 #Horizontal bar chart
-
-
 
 bigramCounts <- wordCounts[stri_count_words(wordNames) == 2]
 bigrams <- wordNames[stri_count_words(wordNames) == 2]
@@ -141,21 +136,163 @@ tibble(bigrams, bigramCounts) %>%
 
 ```
 
-
 ## Analysis
 
 ### Topic Modeling
+
+Here, I am creating 2 graphical summaries to aid in understanding the ideal number of topics.
 ```{r}
+
+tuning <- FindTopicsNumber(twitter_tbl, topics = seq(2,15,1), metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),verbose = T)
+
+FindTopicsNumber_plot(tuning)
+                          
+```
+From the above line plots, we can see that 5 (as the number of topics) seems to be the most ideal according to CaoJuan2009 (since it is the lowest point on that line) and 7 seems to be the most ideal number of topics according to Deveaud2014.
+* The above plot changes on every run, so the topics most ideal (seen by choosing the highest point on Deveaud2014 line and the lowest point on the CaoJuan2009 line) changes. My above explanation was for one particular run. 
+
+```{r}
+lda_results <- LDA(twitter_tbl, 10) 
+
+lda_betas<-tidy(lda_results, matrix="beta")
+
+betas <- lda_betas %>% 
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  arrange(topic, -beta)
+
+View(betas)
+
+```
+From the **betas** data frame, we can see that the tokens connected to topic 5 seems to mostly be about class and paper and writing, so I would say that an overal interpretation you could make for this topic is that it is about writing papers for a psychology course. For topic 7, most of the words seem to pertain to performance in the class (as tokens such as grades, assignments, and help are included).
+
+
+```{r}
+
+lda_gammas <- tidy(lda_results, matrix="gamma")
+
+gammas <- lda_gammas %>%
+  group_by(document) %>%
+  top_n(1, gamma) %>%
+  slice(1) %>%
+  ungroup %>%
+  mutate(document = as.numeric(document)) %>%
+  arrange(document)
+
+View(gammas)
+
+```
+Here, we can see that gammas shows us which topic is contained in each document, with associated probabilities. 
+
+Then, I am creating a tabular summary of most likely topic per tweet (aka, the number of documents categorized in each topic).
+```{r}
+gammas_long <- gammas %>% 
+  select(-gamma) %>% 
+  table() %>% 
+  as_tibble() %>% 
+  pivot_wider(names_from = topic, values_from = n)
+
+tabSum <- colSums(gammas_long[2:11])
+tabSum
+
+```
+
+Here, I am adding a column called **topic** containing the topic identifiers for the tokens in **twitter_tbl**.
+```{r}
+twitter_tbl$topic <- gammas$topic
 
 ```
 
 
-###Machine Learning
+### Machine Learning
+
+Here, I am creating two 10-fold cross-validated support vector regression models to predict tweet popularity. One model uses just the tokens as predictors, and the other uses both tokens as well as topics as predictors. I am taking advtange of parallelizing in order to run the models more quickly.
+
+```{r warning=FALSE}
+
+twitter_tbl$tweetPop <- dropped_tbl$favoriteCount
+
+
+dummies <- dummy.code(gammas$topic)
+dummies_tbl <- as_tibble(dummies)
+names(dummies_tbl) <- paste0(rep("topicNum", 10), names(dummies_tbl)) # or better names 
+twitter_tbl <- twitter_tbl %>% bind_cols(dummies_tbl)
+
+
+holdout <- sample(nrow(twitter_tbl), 200)
+train <- (1:nrow(twitter_tbl))[-holdout]
+
+train_tbl <- twitter_tbl[train, ]
+test_tbl <- twitter_tbl[holdout,]
+
+cores <- detectCores()
+local_cluster <- makeCluster(cores - 1)
+registerDoParallel(local_cluster)
+
+svr_model <- train(
+  tweetPop ~ .,
+  select(train_tbl, -starts_with("topicNum")), #-topic), #train_tbl,
+  method = "svmLinear3",
+  preProcess = c("center", "scale", "nzv", "knnImpute"),
+  trControl = trainControl(method = "cv", number = 10, verboseIter = T),
+  na.action = na.pass
+)
+
+svr_topic_model <- train(
+  tweetPop ~ .,
+  train_tbl,
+  method = "svmLinear3",
+  preProcess = c("center", "scale", "nzv", "knnImpute"),
+  trControl = trainControl(method = "cv", number = 10, verboseIter = T),
+  na.action = na.pass
+)
+
+
+stopCluster(local_cluster)
+registerDoSEQ()
+
+cor <- cor(predict(svr_model, select(test_tbl, -starts_with("topicNum")), na.action = na.pass), test_tbl$tweetPop)^2
+
+svr_model
+cor
+
+
+cor_topic <- cor(predict(svr_topic_model, test_tbl, na.action = na.pass), test_tbl$tweetPop)^2
+
+svr_topic_model
+cor_topic
+
+```
+
+
+Here, I am visually comparing the two models shown above.
 ```{r}
-#ADDING A COLUMN ; MAKE SURE ROW NUMBERS MATCH UP
+resamples(list("withoutTopics" = svr_model,
+               "withTopics" = svr_topic_model)) %>% 
+  summary
+
+resamples(list("withoutTopics" = svr_model,
+               "withTopics" = svr_topic_model)) %>% 
+  dotplot
+
+resamples(list("withoutTopics" = svr_model,
+               "withTopics" = svr_topic_model)) %>% 
+  dotplot(metric = "MAE")
+
+resamples(list("withoutTopics" = svr_model,
+               "withTopics" = svr_topic_model)) %>% 
+  dotplot(metric = "RMSE")
+
+resamples(list("withoutTopics" = svr_model,
+               "withTopics" = svr_topic_model)) %>% 
+  dotplot(metric = "Rsquared")
 
 ```
 
 
 ### Final Interpretation
 
+
+From the model output of the first chunk under *Machine Learning*, we can see that the correlation value for the model that predicted tweet popularity based on just the tokens was 0.0149. For the model that predicted tweet popularity based on both the tokens as well as the topics, the correlation value was 0.004. In other words, the model without topics as additional predictors performed better (relatively, as both models are still quite poor) at predicting tweet popularity than the model that included the topics as predictors. Because the numbers are so close, it is not quite as evident on the overall dotplot above as to which model is better. With the additional input of metric, we can see that the errors are actually very similar, with very similar intervals as well. With the r-squared metric, it becomes a little more clear that the model with topics has a greater R-squared value, but at the same time, it has such a large 95% confidence interval. In addition, this confidence interval covers the R-squared value for the model without topics as well, so it becomes difficult to truly differentiate the two models. 
+
+If we were to point-blank look at R-squared values, I would conclude that including topics are important in predicting the popularity of tweets. 
